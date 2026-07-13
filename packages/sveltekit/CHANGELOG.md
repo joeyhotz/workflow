@@ -1,5 +1,16 @@
 # @workflow/sveltekit
 
+## 4.0.12
+
+### Patch Changes
+
+- [#2732](https://github.com/vercel/workflow/pull/2732) [`2213c91`](https://github.com/vercel/workflow/commit/2213c91731f6d47373f4ba4c516c39ec2cc0fa94) Thanks [@NathanColosimo](https://github.com/NathanColosimo)! - Respect framework base paths when routing workflow traffic and expose health checks on generated Next.js workflow routes.
+
+- Updated dependencies [[`2213c91`](https://github.com/vercel/workflow/commit/2213c91731f6d47373f4ba4c516c39ec2cc0fa94)]:
+  - @workflow/builders@4.1.2
+  - @workflow/rollup@4.0.12
+  - @workflow/vite@4.0.12
+
 ## 4.0.11
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @workflow/world-vercel
 
+## 4.5.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @workflow/errors@4.1.5
+
 ## 4.5.0
 
 ### Minor Changes
