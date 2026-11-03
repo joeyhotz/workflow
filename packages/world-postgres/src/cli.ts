@@ -5,8 +5,15 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { makeWorkerUtils } from 'graphile-worker';
 import { Pool } from 'pg';
+import { checkMigrationBaseline } from './migration-preflight.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const migrationsFolder = join(__dirname, '..', 'src', 'drizzle', 'migrations');
+
+/** Inspect the installed migration lineage without mutating the database. */
+export async function inspectWorkflowDatabase(pool: Pool) {
+  return checkMigrationBaseline(pool, migrationsFolder);
+}
 
 async function setupDatabase() {
   // Load .env file if it exists
@@ -22,21 +29,20 @@ async function setupDatabase() {
     `📍 Connection: ${connectionString.replace(/^(\w+:\/\/)([^@]+)@/, '$1[redacted]@')}`
   );
 
-  const pool = new Pool({ connectionString, max: 1 });
+  const pool = new Pool({
+    connectionString,
+    max: 1,
+    connectionTimeoutMillis: 10_000,
+  });
   const db = drizzle(pool);
 
   try {
     // Read the migration SQL file
     // The migrations are in src/drizzle/migrations, and this CLI is in dist/
     // So we need to go up one level from dist/ to reach src/
-    const migrationsFolder = join(
-      __dirname,
-      '..',
-      'src',
-      'drizzle',
-      'migrations'
-    );
     console.log(`📂 Running migrations from: ${migrationsFolder}`);
+
+    await inspectWorkflowDatabase(pool);
 
     // Execute the migration
     await migrate(db, {

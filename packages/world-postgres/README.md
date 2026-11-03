@@ -203,6 +203,16 @@ The CLI automatically loads `.env` files and will use the connection string from
 2. `DATABASE_URL` environment variable
 3. Default: `postgres://world:world@localhost:5432/world`
 
+### Read-only migration inspection
+
+`inspectWorkflowDatabase(pool)` from `@workflow/world-postgres/cli` reads the
+installed package's migration files and checks the database without applying
+migrations. The CLI performs the same check before bootstrap. It accepts an
+empty Workflow database or the verified exact 4.3.10 journal and schema, as
+exercised on PostgreSQL 17 including the observed restored index representation.
+Unknown, partial, or repaired v5 schemas are refused. It does not edit migration
+rows. The caller owns the supplied `pg.Pool` and must close it.
+
 ### Database Schema
 
 The setup creates the following tables:
