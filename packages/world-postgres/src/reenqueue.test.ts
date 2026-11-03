@@ -148,6 +148,7 @@ describe('re-enqueue active runs on start', () => {
     delete process.env.DATABASE_URL;
     delete process.env.PORT;
     delete process.env.WORKFLOW_POSTGRES_JOB_PREFIX;
+    delete process.env.WORKFLOW_SKIP_BOOT_RECOVERY;
   });
 
   it('falls back to DATABASE_URL when WORKFLOW_POSTGRES_URL is unset', async () => {
@@ -253,6 +254,30 @@ describe('re-enqueue active runs on start', () => {
       expect.anything()
     );
 
+    await world.close();
+  });
+
+  it('skips recovery when explicitly disabled without suppressing the runner', async () => {
+    mockRunsList({
+      running: [{ runId: 'wrun_legacy', workflowName: 'legacy' }],
+    });
+    const world = createWorld({ pool, recoverActiveRuns: false });
+    await world.start();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(createRecoverableRunsList).not.toHaveBeenCalled();
+    expect(workerUtilsMock.addJob).not.toHaveBeenCalled();
+    await world.close();
+  });
+
+  it('honors WORKFLOW_SKIP_BOOT_RECOVERY in the default configuration', async () => {
+    process.env.WORKFLOW_SKIP_BOOT_RECOVERY = '1';
+    mockRunsList({
+      running: [{ runId: 'wrun_legacy', workflowName: 'legacy' }],
+    });
+    const world = createWorld();
+    await world.start();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(createRecoverableRunsList).not.toHaveBeenCalled();
     await world.close();
   });
 

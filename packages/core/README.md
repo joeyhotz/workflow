@@ -51,6 +51,12 @@ context can attest the receiving runtime separately from the starting client.
 
 Failed-run logs include underlying error causes and codes to help diagnose failures such as socket, DNS, and TLS errors. Unreadable causes are marked without preventing the run from being recorded as failed.
 
+Reading the return value of a failed legacy run with spec version 3 or earlier
+preserves the message and optional stack and code from a valid plain structured
+error as the failure's cause. Modern serialized errors keep their existing
+hydration and fallback behavior. This terminal-read compatibility does not
+replay an active legacy workflow on a newer runtime.
+
 Queued step messages carry immutable run identity in `runContext`, so step
 execution skips the initial `runs.get` and fetches the run row only when
 continuing into workflow replay. Messages from older producers without

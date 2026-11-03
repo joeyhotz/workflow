@@ -440,6 +440,7 @@ export function createQueue(
   let runnerStart: RunnerStart | null = null;
   let closing = false;
   let startPromise: Promise<void> | null = null;
+  let consumerStartPromise: Promise<void> | null = null;
 
   function markMessageCompleted(idempotencyKey: string) {
     completedMessages.delete(idempotencyKey);
@@ -761,7 +762,9 @@ export function createQueue(
           method: 'POST',
           headers: new Headers(headers),
           body,
-          signal: abortSignal,
+          signal: abortSignal
+            ? AbortSignal.any([abortSignal, AbortSignal.timeout(1_800_000)])
+            : AbortSignal.timeout(1_800_000),
           agents: httpAgents,
           ...deliveryTimeouts,
         }
@@ -874,7 +877,7 @@ export function createQueue(
     await promise;
   }
 
-  async function start(): Promise<void> {
+  async function initialize(): Promise<void> {
     if (closing) {
       return;
     }
@@ -888,7 +891,6 @@ export function createQueue(
           });
           await workerUtils.migrate();
           await migratePgBossJobs(workerUtils);
-          await startRunnerWhenExecutorIsReady();
         } catch (err) {
           startPromise = null;
           throw err;
@@ -896,9 +898,16 @@ export function createQueue(
       })();
     }
     await startPromise;
-    if (!closing && !runner && !runnerStart) {
-      await startRunnerWhenExecutorIsReady();
+  }
+
+  async function start(): Promise<void> {
+    await initialize();
+    if (!closing && !runner && !runnerStart && !consumerStartPromise) {
+      consumerStartPromise = startRunnerWhenExecutorIsReady().finally(() => {
+        consumerStartPromise = null;
+      });
     }
+    await consumerStartPromise;
   }
 
   /**
@@ -929,7 +938,7 @@ export function createQueue(
       : 'preserve_run_at';
 
   const queue: Queue['queue'] = async (queue, message, opts) => {
-    await start();
+    await initialize();
     const { prefix, id: queueId } = parseQueueName(queue);
     const body = transport.serialize(message) as Buffer;
     const messageId = MessageId.parse(`msg_${generateMessageId()}`);
@@ -1197,6 +1206,9 @@ export function createQueue(
       logger: graphileLogger,
       ...(config.applicationManagedShutdown === true && {
         noHandleSignals: true,
+      }),
+      ...(config.gracefulShutdownAbortTimeout !== undefined && {
+        gracefulShutdownAbortTimeout: config.gracefulShutdownAbortTimeout,
       }),
       pollInterval: config.pollInterval ?? 500, // per worker; LISTEN/NOTIFY only wakes idle workers early
       taskList,

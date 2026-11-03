@@ -129,6 +129,9 @@ export WORKFLOW_POSTGRES_MAX_POOL_SIZE="10"
 # Optional: Let the application coordinate shutdown (default: false)
 export WORKFLOW_POSTGRES_APPLICATION_MANAGED_SHUTDOWN="1"
 
+# Optional: Do not recover active runs at consumer startup (default: recover)
+export WORKFLOW_SKIP_BOOT_RECOVERY="1"
+
 # Optional: Maximum Hook minimum retention in days (default: 30)
 export WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS="30"
 
@@ -199,6 +202,8 @@ An aborted HTTP request does not guarantee that its server-side handler stopped,
 | `queueConcurrency` | `number`  | `50`                                                                                   | Number of concurrent active step executions per process. Must be high enough to cover any parent→child workflow polling in flight because each `Run#returnValue` await holds a worker slot until the child run terminates. |
 | `pollInterval`     | `number`  | `500`                                                                                  | Milliseconds between idle job fetches per worker. |
 | `applicationManagedShutdown` | `boolean` | `false`; `WORKFLOW_POSTGRES_APPLICATION_MANAGED_SHUTDOWN=1` enables it for the default package configuration | Whether the application coordinates shutdown and awaits `world.close()` instead of Graphile Worker responding automatically. |
+| `recoverActiveRuns` | `boolean` | `true` | Whether `start()` recovers active runs, including legacy runs without a stamped job prefix. Set to `false` to opt out. |
+| `gracefulShutdownAbortTimeout` | `number` | Graphile Worker default | Milliseconds passed to Graphile Worker before aborting in-flight deliveries during shutdown. |
 | `jobLockStaleSeconds` | `number` | `process.env.WORKFLOW_POSTGRES_JOB_LOCK_STALE_SECONDS` or `0` (off) | Seconds a running delivery's job lock may go unrenewed before another process redelivers the job. `0` turns renewal and the release of stale locks off. `30` is a good value when more than one process shares the database. See [Crash recovery](#crash-recovery). |
 
 ## Environment variables
@@ -212,6 +217,7 @@ An aborted HTTP request does not guarantee that its server-side handler stopped,
 | `WORKFLOW_POSTGRES_POLL_INTERVAL_MS`   | Milliseconds between idle job fetches per worker             | `500`                                           |
 | `WORKFLOW_POSTGRES_MAX_POOL_SIZE`      | Internal `pg.Pool` max size                                  | `10`                                            |
 | `WORKFLOW_POSTGRES_APPLICATION_MANAGED_SHUTDOWN` | Set to `1` when the application coordinates shutdown and awaits `world.close()` | unset (`false`) |
+| `WORKFLOW_SKIP_BOOT_RECOVERY` | Set to `1` to disable startup recovery in the default package configuration | unset (recovery enabled) |
 | `WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS` | Maximum Hook minimum retention in days | `30` |
 | `WORKFLOW_POSTGRES_JOB_LOCK_STALE_SECONDS` | Seconds a running delivery's job lock may go unrenewed before another process redelivers the job; `0` disables | `0` (off) |
 
@@ -270,44 +276,64 @@ import * as schema from '@workflow/world-postgres/schema';
 
 Make sure your PostgreSQL database is accessible and the user has sufficient permissions to create tables and manage jobs.
 
+### Upgrading from the supported v4 checkpoint
+
+The installed CLI's read-only `inspectWorkflowDatabase(pool)` export classifies
+an empty Workflow database, the genuine world-postgres 4.3.10 checkpoint, or a
+complete repaired 5.1.0 lineage and reports pending migrations. It uses the
+installed migration files and validates the journal hashes and schema; the
+caller owns and closes the pool. The inspection performs no migration. It
+refuses 4.3.11, unknown and partial lineages. The checked schema fingerprints
+are for the verified PostgreSQL 17/default-search-path forms, not every possible
+server configuration.
+
+```typescript
+import { Pool } from 'pg';
+import { inspectWorkflowDatabase } from '@workflow/world-postgres/cli';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+try {
+  const inspection = await inspectWorkflowDatabase(pool);
+  console.log(inspection.lineage, inspection.pendingMigrations);
+} finally {
+  await pool.end();
+}
+```
+
+The supported 4.3.10 upgrade adds the genuine `0015a` catch-up journal entry
+between 0015 and 0016. It restores the schema effects omitted by the earlier
+version while preserving the existing migration rows and hashes. Do not edit
+or manufacture journal entries.
+
+For a major upgrade, stop external intake and let all old workflows, including
+children, finish on v4. Require all old queue jobs to drain, then stop old
+consumers and recycle every old database client before migration. If the drain
+times out, retain the jobs and continue operating on v4. This path does not
+replay partial v4 histories on v5. Distinct queue prefixes isolate task claims;
+they do not make mixed-version access to a shared changing schema safe.
+
+Enqueueing with `queue()` initializes the producer without starting a consumer;
+call `start()` explicitly to consume. HTTP queue deliveries have an absolute
+30-minute limit through response-body reads, composed with Graphile's shutdown
+abort. `applicationManagedShutdown` remains the existing opt-in for an app
+that coordinates shutdown and awaits `world.close()`.
+
 ### Timestamps and time zones
 
-Every timestamp column is `timestamp with time zone`, so values are correct
-whatever time zone the server or session runs in. Earlier versions used
-`timestamp without time zone`: on a server outside UTC, `createdAt` came back
-off by the server's UTC offset (for example 7 hours early on
-`America/Los_Angeles`).
+Migration 0027 converts earlier `timestamp without time zone` columns to
+`timestamp with time zone`. Establish the historical writer time zone before
+running it: the migration's `workflow.legacy_timezone` setting must describe
+the zone in which the legacy values were written. Set it to `UTC` only for a
+verified UTC-written history. Stop if the historical zone is unknown or mixed;
+the current server setting alone is not proof of the writer zone.
+The migration session's zone can otherwise shift legacy `now()`-derived values.
 
-Migration 0027 converts the columns. On a server in UTC it only changes the
-catalog and rebuilds one small partial index, `workflow_invocations_pending`;
-no table is rewritten. On a server in another time zone it also moves the
-values that came from `now()` (every `created_at`, `updated_at` on rows never
-updated, and `workflow_invocations.responded_at`) from the server's local time
-to the instant they recorded. That costs about one rewrite of each table (new
-row versions, WAL, and bloat until vacuum), with the tables' locks held until
-it finishes, so plan a maintenance window for a large database.
-
-The migration waits at most 10 seconds for its locks (unless the session sets
-its own `lock_timeout`), so a long-running transaction makes `bootstrap` fail
-instead of queueing every query behind it. Run `bootstrap` again once that
-transaction ends.
-
-It assumes the `now()` values were written in the time zone of the session
-that runs the migration. If your application's pool set a different session
-time zone, set `workflow.legacy_timezone` to that zone for the migration. Use
-`?options=-c%20workflow.legacy_timezone%3DEurope%2FBerlin` in the connection
-string, or, where a pooler drops startup `options` (PgBouncer and several
-hosted poolers), `ALTER DATABASE mydb SET workflow.legacy_timezone =
-'Europe/Berlin'` or `ALTER ROLE myuser SET ...` before running `bootstrap`.
-
-On a server in UTC the upgrade order does not matter: the upgraded World reads
-unconverted columns correctly in any Node.js time zone, and older versions read
-converted ones correctly. On a server outside UTC, stop the previous version's
-workers, run the migration, then start the upgraded app. Older versions read
-the converted columns shifted by the server's UTC offset, which can skip or
-stretch step retry backoffs. For the same reason there is no rolling back past
-0027 on such a server: the migration has no down step, and an older version
-would read every converted value shifted.
+Recycle all old clients and pools before migration. An old non-UTC reader can
+interpret legacy timestamps with a shifted instant, and a named prepared query
+kept across the type change can fail with PostgreSQL `0A000` (cached plan result
+type changed). Migration locks and data volume need an operator-reviewed
+maintenance plan; local rehearsal timings do not establish a production window.
+After v5 writes, do not restart the old binary against the changed database.
 
 ### Data retention
 
@@ -529,6 +555,9 @@ export WORKFLOW_TARGET_WORLD="@workflow/world-postgres"
 ## Testing
 
 Integration tests use [Testcontainers](https://testcontainers.com/) to start a PostgreSQL container. **Docker must be installed and running** before you run tests.
+
+See [Native migration testing](NATIVE-MIGRATION-TESTING.md) for the opt-in
+major-upgrade fixtures, their prerequisites and the limits of their evidence.
 
 - **Linux/macOS**: Start the Docker daemon (e.g. `sudo systemctl start docker` or Docker Desktop).
 - **WSL2**: Use Docker Desktop with WSL2 integration, or run the Docker engine inside WSL and ensure the daemon is started. Verify with `docker info`.

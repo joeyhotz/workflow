@@ -20,6 +20,10 @@ export type PostgresWorldConfig = PgConnectionConfig & {
    */
   namespace?: string;
   queueConcurrency?: number;
+  /** Whether start() recovers active runs, including unstamped legacy runs. Defaults to true. */
+  recoverActiveRuns?: boolean;
+  /** Milliseconds Graphile waits before aborting in-flight deliveries during shutdown. */
+  gracefulShutdownAbortTimeout?: number;
   /** Milliseconds between idle job fetches per worker. Defaults to 500. */
   pollInterval?: number;
   /** Enable experimental invoke() delivery with one Graphile execution queue per run. */

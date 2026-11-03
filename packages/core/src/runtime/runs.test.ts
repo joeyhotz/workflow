@@ -980,7 +980,11 @@ describe('Run.returnValue when run.status === "failed"', () => {
     setWorld(undefined as unknown as World);
   });
 
-  function makeFailedRunWorld(error: Uint8Array, errorCode?: string): World {
+  function makeFailedRunWorld(
+    error: unknown,
+    errorCode?: string,
+    specVersion = 2
+  ): World {
     return {
       specVersion: SPEC_VERSION_CURRENT,
       runs: {
@@ -988,7 +992,7 @@ describe('Run.returnValue when run.status === "failed"', () => {
           runId: 'wrun_failed',
           workflowName: 'failing-workflow',
           status: 'failed',
-          specVersion: 2,
+          specVersion,
           input: [],
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -1010,6 +1014,43 @@ describe('Run.returnValue when run.status === "failed"', () => {
       queue: vi.fn().mockResolvedValue(undefined),
     } as unknown as World;
   }
+
+  it.each([
+    {
+      specVersion: 3,
+      error: {
+        message: 'slice1b workflow failure',
+        stack: 'Error: slice1b workflow failure\n    at fixture:4:117',
+        code: 'USER_ERROR',
+      },
+      expected: {
+        message: 'slice1b workflow failure',
+        stack: 'Error: slice1b workflow failure\n    at fixture:4:117',
+        code: 'USER_ERROR',
+      },
+    },
+    {
+      specVersion: 3,
+      error: { message: 42, code: 'USER_ERROR' },
+      expected: { message: 'Failed to hydrate workflow run error' },
+    },
+    {
+      specVersion: 4,
+      error: { message: 'slice1b workflow failure', code: 'USER_ERROR' },
+      expected: { message: 'Failed to hydrate workflow run error' },
+    },
+  ])('reads only valid legacy structured errors (spec $specVersion)', async ({
+    specVersion,
+    error,
+    expected,
+  }) => {
+    setWorld(makeFailedRunWorld(error, 'RUNTIME_ERROR', specVersion));
+    await expect(new Run('wrun_failed').returnValue).rejects.toMatchObject({
+      name: 'WorkflowRunFailedError',
+      errorCode: 'RUNTIME_ERROR',
+      cause: expected,
+    });
+  });
 
   it('should throw WorkflowRunFailedError with the original FatalError as cause', async () => {
     const original = new FatalError('boom');

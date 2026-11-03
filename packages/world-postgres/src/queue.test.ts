@@ -119,6 +119,100 @@ describe('postgres queue http execution', () => {
     setWorkflowBasePath(undefined);
   });
 
+  it('enqueues without starting a consumer until start is explicit', async () => {
+    const queue = buildQueue({ connectionString: 'postgres://test' }, pool);
+    await queue.queue('__wkf_workflow_example', { runId: 'run_01ABC' });
+    expect(workerUtilsMock.addJob).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+    await queue.start();
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the same in-progress consumer start on concurrent start calls', async () => {
+    const pending = Promise.withResolvers<Runner>();
+    vi.mocked(run).mockReturnValueOnce(pending.promise);
+    const queue = buildQueue({ connectionString: 'postgres://test' }, pool);
+    const first = queue.start();
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    const second = queue.start();
+    try {
+      await expect(
+        settleWithin(
+          second.then(() => 'started'),
+          50
+        )
+      ).resolves.toEqual({ status: 'pending' });
+    } finally {
+      pending.resolve(runnerMock as unknown as Runner);
+      await Promise.all([first, second]);
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards a configured Graphile shutdown abort grace', async () => {
+    const queue = buildQueue(
+      {
+        connectionString: 'postgres://test',
+        gracefulShutdownAbortTimeout: 7000,
+      },
+      pool
+    );
+    await queue.start();
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ gracefulShutdownAbortTimeout: 7000 })
+    );
+  });
+
+  it.each([
+    'body',
+    'dribble',
+  ] as const)('enforces the absolute delivery cap through a %s response body', async (stage) => {
+    const server = await startHangingWorkflowHttpServer(stage);
+    process.env.WORKFLOW_LOCAL_BASE_URL = server.baseUrl;
+    const responseReceived = Promise.withResolvers<void>();
+    const responseChannel = channel('http.client.response.finish');
+    const onResponse = (message: unknown) => {
+      const { request } = message as { request: ClientRequest };
+      if (
+        request.getHeader('host') === new URL(server.baseUrl).host &&
+        request.path === '/.well-known/workflow/v1/flow'
+      )
+        responseReceived.resolve();
+    };
+    responseChannel.subscribe(onResponse);
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => timeout(150));
+    try {
+      const queue = buildQueue({ connectionString: 'postgres://test' }, pool);
+      await queue.start();
+      const execution = getTaskHandler('workflow_flows')(
+        buildMessageData('__wkf_workflow_test-step', {
+          runId: 'run_01ABC',
+          stepId: 'step_01ABC',
+          stepName: 'test-step',
+        }),
+        { abortSignal: new AbortController().signal, job: { attempts: 1 } }
+      );
+      const outcome = execution.then(
+        () => ({ status: 'fulfilled' as const }),
+        (error: unknown) => ({ status: 'rejected' as const, error })
+      );
+      await responseReceived.promise;
+      await expect(settleWithin(outcome, 500)).resolves.toMatchObject({
+        status: 'rejected',
+        error: expect.objectContaining({ name: 'TimeoutError' }),
+      });
+      if (stage === 'dribble') expect(server.dribbleCount()).toBeGreaterThan(1);
+      expect(timeoutSpy).toHaveBeenCalledWith(1_800_000);
+      expect(workerUtilsMock.addJob).not.toHaveBeenCalled();
+    } finally {
+      timeoutSpy.mockRestore();
+      responseChannel.unsubscribe(onResponse);
+    }
+  });
+
   it('places no deadline on a delivery unless the operator sets one', () => {
     expect(getDeliveryTimeouts()).toEqual({
       headersTimeoutMs: DEFAULT_DELIVERY_HEADERS_TIMEOUT_MS,
@@ -1539,18 +1633,28 @@ async function startWorkflowHttpServer(
   };
 }
 
-async function startHangingWorkflowHttpServer(stage: 'headers' | 'body') {
+async function startHangingWorkflowHttpServer(
+  stage: 'headers' | 'body' | 'dribble'
+) {
   let resolveRequestReceived!: () => void;
   const requestReceived = new Promise<void>((resolve) => {
     resolveRequestReceived = resolve;
   });
+  let chunks = 0;
   const server = createServer((req, res) => {
     req.resume();
     resolveRequestReceived();
 
-    if (stage === 'body') {
+    if (stage === 'body' || stage === 'dribble') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"ok":');
+      if (stage === 'dribble') {
+        const interval = setInterval(() => {
+          chunks++;
+          res.write(' ');
+        }, 10);
+        res.on('close', () => clearInterval(interval));
+      }
     }
   });
 
@@ -1568,6 +1672,7 @@ async function startHangingWorkflowHttpServer(stage: 'headers' | 'body') {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     requestReceived,
+    dribbleCount: () => chunks,
   };
 }
 

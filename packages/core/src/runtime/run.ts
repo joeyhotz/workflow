@@ -10,6 +10,8 @@ import {
 import { WORKFLOW_DESERIALIZE, WORKFLOW_SERIALIZE } from '@workflow/serde';
 import {
   SPEC_VERSION_CURRENT,
+  SPEC_VERSION_SUPPORTS_CBOR_QUEUE_TRANSPORT,
+  StructuredErrorSchema,
   type WorkflowRun,
   type WorkflowRunStatus,
   type World,
@@ -636,17 +638,32 @@ export class Run<TResult> {
       // `cause` on WorkflowRunFailedError.
       const encryptionKey = await this.#getEncryptionKey(run);
       let hydratedError: unknown;
-      try {
-        hydratedError = await hydrateRunError(
-          run.error,
-          this.runId,
-          encryptionKey
-        );
-      } catch {
-        // If hydration fails, surface a generic fallback rather than
-        // leaving the user with a raw Uint8Array. The run's errorCode
-        // is still preserved on the thrown WorkflowRunFailedError.
-        hydratedError = new Error('Failed to hydrate workflow run error');
+      const legacy =
+        run.specVersion !== undefined &&
+        run.specVersion <= SPEC_VERSION_SUPPORTS_CBOR_QUEUE_TRANSPORT &&
+        run.error !== null &&
+        typeof run.error === 'object' &&
+        Object.getPrototypeOf(run.error) === Object.prototype
+          ? StructuredErrorSchema.safeParse(run.error)
+          : undefined;
+      if (legacy?.success) {
+        const error = new Error(legacy.data.message);
+        if (legacy.data.stack !== undefined) error.stack = legacy.data.stack;
+        hydratedError =
+          legacy.data.code === undefined
+            ? error
+            : Object.assign(error, { code: legacy.data.code });
+      } else {
+        try {
+          hydratedError = await hydrateRunError(
+            run.error,
+            this.runId,
+            encryptionKey
+          );
+        } catch {
+          // Preserve the generic fallback for invalid or modern payloads.
+          hydratedError = new Error('Failed to hydrate workflow run error');
+        }
       }
       throw new WorkflowRunFailedError(this.runId, hydratedError, {
         errorCode: run.errorCode,

@@ -71,6 +71,7 @@ export function createWorld(
     applicationManagedShutdown:
       process.env.WORKFLOW_POSTGRES_APPLICATION_MANAGED_SHUTDOWN === '1',
     enableInvoke: process.env.WORKFLOW_POSTGRES_INVOKE === '1',
+    recoverActiveRuns: process.env.WORKFLOW_SKIP_BOOT_RECOVERY !== '1',
   }
 ): World &
   Required<Pick<Queue, 'registerHandler' | 'registerRoute'>> & {
@@ -134,18 +135,20 @@ export function createWorld(
     }),
     async start() {
       await queue.start();
-      // Recover only this World's runs (and unstamped legacy ones): every
-      // recovered run lands in this World's own task, so a run created under
-      // another `jobPrefix` would be driven by the wrong app's runner.
-      await reenqueueActiveRuns(
-        {
-          ...storage.runs,
-          list: createRecoverableRunsList(drizzle, jobPrefix),
-        },
-        queue.queue,
-        'world-postgres',
-        config.namespace
-      );
+      if (config.recoverActiveRuns !== false) {
+        // Recover only this World's runs (and unstamped legacy ones): every
+        // recovered run lands in this World's own task, so a run created under
+        // another `jobPrefix` would be driven by the wrong app's runner.
+        await reenqueueActiveRuns(
+          {
+            ...storage.runs,
+            list: createRecoverableRunsList(drizzle, jobPrefix),
+          },
+          queue.queue,
+          'world-postgres',
+          config.namespace
+        );
+      }
     },
     async close() {
       closing = true;
