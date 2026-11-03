@@ -11,7 +11,8 @@
   "files": [
     "dist",
     "bin",
-    "src/drizzle/migrations"
+    "src/drizzle/migrations",
+    "NATIVE-MIGRATION-TESTING.md"
   ],
   "publishConfig": {
     "access": "public"
